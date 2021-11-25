@@ -13,8 +13,14 @@ public class CacheReader implements Runnable {
   @Override
   public void run() {
     try {
-      System.out.printf("Thread %s. Reading value at %s\n", Thread.currentThread().getName(), System.currentTimeMillis());
-      System.out.printf("Thread %s. Value %s at %s\n", Thread.currentThread().getName(), this.cache.get("something"), System.currentTimeMillis());
+      System.out.printf(
+          "Thread %s. Reading value at %s\n",
+          Thread.currentThread().getName(), System.currentTimeMillis());
+      System.out.printf(
+          "Thread %s. Value %s at %s\n",
+          Thread.currentThread().getName(),
+          this.cache.get("something"),
+          System.currentTimeMillis());
     } catch (ExecutionException e) {
       System.out.printf("Thread %s. Exception %s\n", Thread.currentThread().getName(), e);
     }
