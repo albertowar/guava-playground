@@ -1,5 +1,6 @@
 package org.example;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
@@ -11,73 +12,69 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
+import lombok.extern.slf4j.Slf4j;
 
+@Slf4j
 public class CacheFactory {
-  public static LoadingCache<String, String> buildCache(String baseUrl) {
+  private static final ObjectMapper mapper = new ObjectMapper();
+
+  public static LoadingCache<String, Data> buildCache(String baseUrl) {
     return CacheBuilder.newBuilder()
         .refreshAfterWrite(Constants.CACHE_REFRESH_TIME_MS, TimeUnit.MILLISECONDS)
         .build(buildCacheLoader(baseUrl));
   }
 
-  public static LoadingCache<String, String> buildCacheWithEviction(String baseUrl) {
-    return CacheBuilder.newBuilder()
-        .expireAfterWrite(Constants.CACHE_REFRESH_TIME_MS, TimeUnit.MILLISECONDS)
-        .build(buildCacheLoader(baseUrl));
-  }
-
-  public static LoadingCache<String, String> buildCacheWithoutExceptionHandling(String baseUrl) {
+  public static LoadingCache<String, Data> buildCacheWithoutExceptionHandling(String baseUrl) {
     return CacheBuilder.newBuilder()
         .refreshAfterWrite(Constants.CACHE_REFRESH_TIME_MS, TimeUnit.MILLISECONDS)
         .build(buildCacheLoaderWithoutExceptionHandling(baseUrl));
   }
 
-  public static LoadingCache<String, String> buildCacheWithAsyncLoading(
+  public static LoadingCache<String, Data> buildCacheWithAsyncLoading(
       String baseUrl, ExecutorService pool) {
     return CacheBuilder.newBuilder()
         .refreshAfterWrite(Constants.CACHE_REFRESH_TIME_MS, TimeUnit.MILLISECONDS)
         .build(CacheLoader.asyncReloading(CacheFactory.buildCacheLoader(baseUrl), pool));
   }
 
-  private static CacheLoader<String, String> buildCacheLoaderWithoutExceptionHandling(
+  private static CacheLoader<String, Data> buildCacheLoaderWithoutExceptionHandling(
       String baseUrl) {
     return new CacheLoader<>() {
       @Override
-      public String load(final String environment) throws Exception {
+      public Data load(final String environment) throws Exception {
         return fetchData(baseUrl);
       }
 
       @Override
-      public ListenableFuture<String> reload(String key, String oldValue) throws Exception {
-        System.out.printf("Reloading on thread %s\n", Thread.currentThread().getName());
+      public ListenableFuture<Data> reload(String key, Data oldValue) throws Exception {
+        log.info("Reloading");
         return super.reload(key, oldValue);
       }
     };
   }
 
-  private static CacheLoader<String, String> buildCacheLoader(String baseUrl) {
+  private static CacheLoader<String, Data> buildCacheLoader(String baseUrl) {
     return new CacheLoader<>() {
       @Override
-      public String load(final String environment) throws Exception {
+      public Data load(final String environment) throws Exception {
         try {
           return fetchData(baseUrl);
         } catch (Exception e) {
-          System.out.printf(
-              "Loading Exception on thread %s at %s\n",
-              Thread.currentThread().getName(), System.currentTimeMillis());
+          log.error("Loading Exception at {}", System.currentTimeMillis(), e);
           throw e;
         }
       }
 
       @Override
-      public ListenableFuture<String> reload(String key, String oldValue) throws Exception {
-        System.out.printf("Reloading on thread %s\n", Thread.currentThread().getName());
+      public ListenableFuture<Data> reload(String key, Data oldValue) throws Exception {
+        log.info("Reloading");
         return super.reload(key, oldValue);
       }
     };
   }
 
-  private static String fetchData(String baseUrl) throws Exception {
-    System.out.printf("Loading on thread %s\n", Thread.currentThread().getName());
+  private static Data fetchData(String baseUrl) throws Exception {
+    log.info("Fetching data");
     var builder =
         HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(Constants.TIMEOUT_IN_SECONDS));
 
@@ -91,6 +88,6 @@ public class CacheFactory {
     final HttpResponse<String> response =
         client.send(request, HttpResponse.BodyHandlers.ofString());
 
-    return response.body();
+    return mapper.readValue(response.body(), Data.class);
   }
 }

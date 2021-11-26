@@ -1,144 +1,109 @@
 package org.example;
 
+import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
+import static com.github.tomakehurst.wiremock.client.WireMock.get;
+import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.tomakehurst.wiremock.WireMockServer;
 import com.google.common.cache.LoadingCache;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import lombok.SneakyThrows;
+import lombok.extern.slf4j.Slf4j;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import java.util.LinkedList;
-import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-
-import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
-import static com.github.tomakehurst.wiremock.client.WireMock.get;
-import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig;
-
+@Slf4j
 public class GuavaPlaygroundTests {
   private static final int THREAD_COUNT = 3;
+  private static final ObjectMapper mapper = new ObjectMapper();
 
   private static WireMockServer wireMockServer;
 
-  /*
-   The Exception is logged and shallowed. Our logger ignores that package (com.google.common)
-  */
-  @Test
-  void
-      example1_givenPopulatedCache_whenFutureResponsesTimeoutAndNoExceptionHandling_exceptionShallowed()
-          throws InterruptedException {
-    LoadingCache<String, String> cache =
-        CacheFactory.buildCacheWithoutExceptionHandling(wireMockServer.baseUrl());
+  private static final Thread.UncaughtExceptionHandler handler =
+      (t, e) -> log.error("Uncaught exception");
 
-    setupRemoteResponse("old");
+  @Test
+  @SneakyThrows
+  void givenEmptyCache_whenRemoteServiceTimeout_shouldThrowException() {
+    var cache = CacheFactory.buildCacheWithoutExceptionHandling(wireMockServer.baseUrl());
+
+    setupRemoteResponse(new Data("value"), 2 * Constants.TIMEOUT_IN_SECONDS);
 
     var thread = new Thread(new CacheReader(cache));
     thread.start();
+    thread.join();
+  }
+
+  @Test
+  @SneakyThrows
+  void givenEmptyCache_whenRemoteServiceReturns500_shouldThrowException() {
+    var cache = CacheFactory.buildCacheWithoutExceptionHandling(wireMockServer.baseUrl());
+
+    setupFailedResponse();
+
+    var thread = new Thread(new CacheReader(cache));
+    thread.start();
+    thread.join();
+  }
+
+  @Test
+  @SneakyThrows
+  void givenCacheDueForRefresh_whenRemoteServiceTimeout_shouldGetOldValue() {
+    var cache = CacheFactory.buildCacheWithoutExceptionHandling(wireMockServer.baseUrl());
+
+    setupRemoteResponse(new Data("old_value"));
+
+    var thread = new Thread(new CacheReader(cache));
+    thread.start();
+    thread.join();
 
     waitForCacheToExpire();
 
-    setupRemoteResponse("new", 2 * Constants.TIMEOUT_IN_SECONDS);
+    setupRemoteResponse(new Data("new_value"), 2 * Constants.TIMEOUT_IN_SECONDS);
 
-    runManyAndWait(cache, THREAD_COUNT);
+    thread = new Thread(new CacheReader(cache));
+    thread.start();
+    thread.join();
   }
 
-  /*
-  What if the refresh timed out?
-    If there is an old value, the loader thread will block fetching the new value. If it fails, a exception is thrown on the "loader" thread and it will get the old value.
-    Any other threads that attempt to load the value at the same time than the loader, will get the old value instead
-
-    In the event of a timeout, this is the behavior we should have seen. The website times out after 10 seconds, so maybe we hit it.
-   */
   @Test
-  void example2_sameSetupAsProduction_SimulatedFailure_shouldReturnOldValue()
-      throws InterruptedException {
-    LoadingCache<String, String> cache = CacheFactory.buildCache(wireMockServer.baseUrl());
+  @SneakyThrows
+  void givenCacheDueForRefresh_whenRemoteServiceTimeout_allThreadsShouldGetOldValue() {
+    var cache = CacheFactory.buildCacheWithoutExceptionHandling(wireMockServer.baseUrl());
 
-    wireMockServer.stubFor(get("/").willReturn(aResponse().withStatus(200).withBody("old")));
+    setupRemoteResponse(new Data("old_value"));
 
-    var reader = new CacheReader(cache);
-    reader.run();
+    var thread = new Thread(new CacheReader(cache));
+    thread.start();
+    thread.join();
 
     waitForCacheToExpire();
 
-    setupRemoteResponse("new", 2 * Constants.TIMEOUT_IN_SECONDS);
+    setupRemoteResponse(new Data("new_value"), 2 * Constants.TIMEOUT_IN_SECONDS);
 
-    runManyAndWait(cache, THREAD_COUNT);
-  }
-
-  /*
-  What if the cache was empty?
-    That's ruled out because we would have seen an exception way sooner and in all threads
-   */
-  @Test
-  void example3_sameSetupAsProduction_emptyCacheAndFutureResponsesTimeout_shouldThrowException()
-      throws InterruptedException {
-    LoadingCache<String, String> cache = CacheFactory.buildCache(wireMockServer.baseUrl());
-    setupRemoteResponse("new", 2 * Constants.TIMEOUT_IN_SECONDS);
-
-    runManyAndWait(cache, THREAD_COUNT);
-  }
-
-  /*
-  What if we use eviction?
-    We can't use eviction because we still want to get the old value while the new one is being fetched
-   */
-  @Test
-  void example4_usingEvictionInstead_whenFutureResponsesTimeout_throwsException()
-      throws InterruptedException {
-    LoadingCache<String, String> cache =
-        CacheFactory.buildCacheWithEviction(wireMockServer.baseUrl());
-
-    setupRemoteResponse("old");
-
-    var reader = new CacheReader(cache);
-    reader.run();
-
-    waitForCacheToExpire();
-
-    setupRemoteResponse("new", 2 * Constants.TIMEOUT_IN_SECONDS);
-
-    runManyAndWait(cache, THREAD_COUNT);
-  }
-
-  /*
-  What happens if we try again? Will future threads get the old value?
-    As long as the previous "loading" thread has finished, if there are more attempts, a new "loading" thread will attempt again and the rest will return the old value
-    That means a thread will always block with the current implementation
-   */
-  @Test
-  void example5_sameSetupAsProduction_whenFutureResponsesTimeoutAndMultipleAttempts_returnOldValue()
-      throws InterruptedException {
-    LoadingCache<String, String> cache = CacheFactory.buildCache(wireMockServer.baseUrl());
-    setupRemoteResponse("old");
-
-    var reader = new CacheReader(cache);
-    reader.run();
-
-    waitForCacheToExpire();
-
-    setupRemoteResponse("new", 2 * Constants.TIMEOUT_IN_SECONDS);
-
-    runManyAndWait(cache, THREAD_COUNT);
-    runManyAndWait(cache, THREAD_COUNT);
+    runManyAndWait(cache, 3);
   }
 
   @Test
-  void solution_whenFutureResponsesTimeoutAndAsyncLoading_returnOldValue()
-      throws InterruptedException {
+  @SneakyThrows
+  void solution_whenFutureResponsesTimeoutAndAsyncLoading_returnOldValue() {
     ExecutorService pool = Executors.newFixedThreadPool(10);
     try {
-      LoadingCache<String, String> cache =
-          CacheFactory.buildCacheWithAsyncLoading(wireMockServer.baseUrl(), pool);
+      var cache = CacheFactory.buildCacheWithAsyncLoading(wireMockServer.baseUrl(), pool);
 
-      setupRemoteResponse("old");
+      setupRemoteResponse(new Data("old_value"));
 
       runAndWait(cache);
 
       waitForCacheToExpire();
 
-      setupRemoteResponse("new", 2 * Constants.TIMEOUT_IN_SECONDS);
+      setupRemoteResponse(new Data("new_value"), 2 * Constants.TIMEOUT_IN_SECONDS);
 
       runManyAndWait(cache, THREAD_COUNT);
     } finally {
@@ -147,25 +112,23 @@ public class GuavaPlaygroundTests {
     }
   }
 
-  /*
-  What happens when everything is fine?
-   */
   @Test
-  void givenAnExistingValueInCache_when() throws InterruptedException {
-    LoadingCache<String, String> cache = CacheFactory.buildCache(wireMockServer.baseUrl());
+  @SneakyThrows
+  void happyPath() {
+    var cache = CacheFactory.buildCache(wireMockServer.baseUrl());
 
-    setupRemoteResponse("old");
+    setupRemoteResponse(new Data("old_value"));
 
     runManyAndWait(cache, 1);
 
     waitForCacheToExpire();
 
-    setupRemoteResponse("new");
+    setupRemoteResponse(new Data("new_value"));
 
     runManyAndWait(cache, THREAD_COUNT);
   }
 
-  private void runManyAndWait(LoadingCache<String, String> cache, int threadCount)
+  private void runManyAndWait(LoadingCache<String, Data> cache, int threadCount)
       throws InterruptedException {
     List<Thread> threads = new LinkedList<>();
 
@@ -180,18 +143,31 @@ public class GuavaPlaygroundTests {
     }
   }
 
-  private void runAndWait(LoadingCache<String, String> cache) throws InterruptedException {
+  private void runAndWait(LoadingCache<String, Data> cache) throws InterruptedException {
     runManyAndWait(cache, 1);
   }
 
-  private static void setupRemoteResponse(String body, int delay) {
+  @SneakyThrows
+  private static void setupRemoteResponse(Data data, int delayInSeconds) {
     wireMockServer.resetAll();
     wireMockServer.stubFor(
-        get("/").willReturn(aResponse().withStatus(200).withBody(body).withFixedDelay(delay)));
+        get("/")
+            .willReturn(
+                aResponse()
+                    .withStatus(200)
+                    .withBody(mapper.writeValueAsString(data))
+                    .withFixedDelay(delayInSeconds * 1000)));
   }
 
-  private static void setupRemoteResponse(String body) {
-    wireMockServer.stubFor(get("/").willReturn(aResponse().withStatus(200).withBody(body)));
+  private static void setupFailedResponse() {
+    wireMockServer.resetAll();
+    wireMockServer.stubFor(get("/").willReturn(aResponse().withStatus(500)));
+  }
+
+  @SneakyThrows
+  private static void setupRemoteResponse(Data data) {
+    wireMockServer.stubFor(
+        get("/").willReturn(aResponse().withStatus(200).withBody(mapper.writeValueAsString(data))));
   }
 
   private static void waitForCacheToExpire() throws InterruptedException {
